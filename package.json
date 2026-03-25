@@ -8,8 +8,8 @@
     "build": "vite build",
     "lint": "eslint .",
     "preview": "vite preview",
-    "predeploy": "npm run build",        // 👈 新增這行
-    "deploy": "gh-pages -d dist"         // 👈 新增這行
+    "predeploy": "npm run build",
+    "deploy": "gh-pages -d dist"
   },
   "dependencies": {
     "dexie": "^4.3.0",

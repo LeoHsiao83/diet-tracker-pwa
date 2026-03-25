@@ -2,8 +2,8 @@ import React, { useState, useEffect, useMemo, useRef, useLayoutEffect } from 're
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from './db';
 import { 
-  Utensils, Settings as SettingsIcon, TrendingUp, Activity, PlusSquare, 
-  Trash2, Heart, Camera, RefreshCw, ChevronDown, ChevronLeft, UserPlus, 
+  Utensils, Settings as SettingsIcon, TrendingUp, Activity, 
+  Trash2, Heart, Camera, RefreshCw, ChevronDown, UserPlus, 
   Cloud, CloudOff, PieChart, Lock, LogOut
 } from 'lucide-react';
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer } from 'recharts';
@@ -123,7 +123,9 @@ const NutritionHistoryChart = ({ logs, targets }) => {
 export default function App() {
   const [isLocked, setIsLocked] = useState(true);
   const [pinInput, setPinInput] = useState('');
-  const [config, setConfig] = useState({ gasUrl: '' });
+  
+  // 🌟 新增 geminiKey 到設定狀態中
+  const [config, setConfig] = useState({ gasUrl: '', geminiKey: '' });
   
   const [view, setView] = useState('dashboard');
   const [dashboardTab, setDashboardTab] = useState('today');
@@ -178,8 +180,12 @@ export default function App() {
   useEffect(() => {
     const savedPin = localStorage.getItem('app_secure_pin');
     const savedGasUrl = localStorage.getItem('app_gas_url');
+    const savedGeminiKey = localStorage.getItem('app_gemini_key'); // 讀取 API Key
+    
     if (savedPin) setIsLocked(false);
-    if (savedGasUrl) setConfig({ gasUrl: savedGasUrl });
+    if (savedGasUrl || savedGeminiKey) {
+      setConfig({ gasUrl: savedGasUrl || '', geminiKey: savedGeminiKey || '' });
+    }
   }, []);
 
   const handleUnlock = () => {
@@ -203,7 +209,7 @@ export default function App() {
   const showNotification = (msg, type = "success") => { setNotification({ msg, type }); setTimeout(() => setNotification(null), 3000); };
   const handleUserChange = (newUser) => { setCurrentUser(newUser); localStorage.setItem('app_current_user', newUser); };
 
-  // --- 🚀 直接顯示在螢幕上的同步引擎 ---
+  // --- GAS 資料庫雙向同步邏輯 (維持不變) ---
   const handleSync = async () => {
     const gasUrl = localStorage.getItem('app_gas_url');
     const pin = localStorage.getItem('app_secure_pin');
@@ -211,7 +217,6 @@ export default function App() {
     
     setIsSyncing(true);
     try {
-      // 0. 處理刪除佇列 (Queue)
       const queueItems = await db.syncQueue.toArray();
       if (queueItems.length > 0) {
         alert(`🚨 [偵測到刪除佇列]\n即將傳送 ${queueItems.length} 筆刪除任務到 GAS！`);
@@ -230,7 +235,6 @@ export default function App() {
         }
       }
 
-      // 1. Push Logs
       const pendingLogs = await db.logs.where('syncStatus').equals(0).toArray();
       for (const log of pendingLogs) {
         const payload = { action: 'addLog', pin, userName: log.userName, date: log.date.split('T')[0], type: log.type, itemName: log.value, calories: log.calories, carbs: log.carbs, protein: log.protein, fat: log.fat, note: log.note };
@@ -238,7 +242,6 @@ export default function App() {
         if ((await res.json()).status === 'success') await db.logs.update(log.id, { syncStatus: 1 });
       }
       
-      // 2. Push Favs
       const pendingFavs = await db.favorites.where('syncStatus').equals(0).toArray();
       for (const fav of pendingFavs) {
         const payload = { action: 'addFavorite', pin, userName: fav.userName, itemName: fav.name, tag: fav.tag, calories: fav.calories, carbs: fav.carbs, protein: fav.protein, fat: fav.fat };
@@ -246,7 +249,6 @@ export default function App() {
         if ((await res.json()).status === 'success') await db.favorites.update(fav.id, { syncStatus: 1 });
       }
 
-      // 3. Pull 最新雲端資料
       const pullRes = await fetch(`${gasUrl}?action=getLogs&userName=${encodeURIComponent(currentUser)}&pin=${pin}&page=1&pageSize=300`);
       const pullData = await pullRes.json();
       
@@ -283,7 +285,6 @@ export default function App() {
     showNotification("已記錄於本地"); setView('dashboard'); setMealForm({ name: '', calories: '', carbs: '', protein: '', fat: '', note: '', tag: '' }); setWeightInput('');
   };
 
-  // --- 🗑️ 裝上直接彈窗提示的刪除邏輯 ---
   const deleteLogLocally = async (id) => {
     if(!confirm('確定要刪除這筆資料嗎？(將在下次同步時更新雲端)')) return;
     const logToDelete = await db.logs.get(id);
@@ -326,31 +327,71 @@ export default function App() {
     showNotification("個人資料已更新");
   };
 
+// 🚀 全新前端直連架構：直接用手機呼叫 Gemini API (防廢話強化版)
   const handleImageAnalysis = async (e, type) => {
-    const gasUrl = localStorage.getItem('app_gas_url');
-    const pin = localStorage.getItem('app_secure_pin');
-    if(!gasUrl) return showNotification("請先設定 GAS URL", "error");
+    const geminiKey = localStorage.getItem('app_gemini_key');
+    if(!geminiKey) return showNotification("請先至設定填寫 Gemini API Key", "error");
 
-    const file = e.target.files[0]; if (!file) return;
-    e.target.value = ''; setAnalyzing(true);
-    const reader = new FileReader(); reader.readAsDataURL(file);
+    const file = e.target.files[0]; 
+    if (!file) return;
+
+    e.target.value = ''; 
+    setAnalyzing(true);
+
+    const reader = new FileReader(); 
+    reader.readAsDataURL(file);
     reader.onloadend = async () => {
       const base64 = reader.result.split(',')[1];
+      
+      // 🛑 防護 1：嚴格限制 AI 的輸出格式，禁止任何問候語
       const prompt = type === 'meal' 
-        ? "請擔任專業營養師。你的任務是計算圖片中『所有食物』的總營養成分，無論是否有營養標示。請執行以下步驟：1. 有營養標示的食物：讀取標示數值。注意：若標示顯示『本包裝含X份』，請務必將每份數值乘以 X，計算整份包裝總值。2. 無營養標示的食物（如茶葉蛋、水果、散裝食物）：請辨識食物種類並根據圖片份量『估算』其營養數值。3. 最終加總：將(1)與(2)的所有數值合併計算。回傳 JSON 格式 (正體中文)：{name: '品項名稱(列出所有辨識到的食物)', calories: 總熱量(數字), carbs: 總碳水(數字), protein: 總蛋白質(數字), fat: 總脂肪(數字), note: '簡述計算細節(例如：雞胸肉依包裝標示 + 2顆茶葉蛋估算數值)' }。"
-        : "辨識體重計數字回傳JSON: weight(數字)。純JSON。";
+        ? "請擔任專業營養師。你的任務是計算圖片中『所有食物』的總營養成分，無論是否有營養標示。1. 有標示：讀取數值。若寫『本包裝含X份』請將每份數值乘X。2. 無標示(如茶葉蛋)：估算數值。3. 最終加總。⚠️ 警告：請絕對只輸出純 JSON 格式，嚴禁包含任何問候語、解釋或 Markdown 標記。格式範例：{\"name\": \"食物A+食物B\", \"calories\": 100, \"carbs\": 10, \"protein\": 10, \"fat\": 10, \"note\": \"計算細節\"}"
+        : "辨識體重計數字。⚠️ 警告：只輸出純 JSON 格式，嚴禁其他文字。格式：{\"weight\": 0.0}";
+
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${geminiKey}`;
 
       try {
-        const res = await fetch(gasUrl, { method: 'POST', body: JSON.stringify({ action: 'analyzeImage', pin, base64, prompt, mimeType: file.type }) });
-        const data = await res.json();
-        if(data.status === 'success') {
-          const json = JSON.parse(data.text.replace(/```json|```/g, '').trim());
-          if(type==='meal') setMealForm(p=>({...p, ...json, name: json.name||"未命名", calories:json.calories||0}));
-          else if(json.weight) setWeightInput(json.weight);
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents: [{ parts: [{ text: prompt }, { inline_data: { mimeType: file.type, data: base64 } }] }]
+          })
+        });
+
+        if (!response.ok) {
+           const errData = await response.json();
+           throw new Error(`伺服器錯誤: ${errData.error?.message || response.status}`);
+        }
+
+        const data = await response.json();
+        
+        if (data.candidates && data.candidates[0].content) {
+          const aiText = data.candidates[0].content.parts[0].text;
+          
+          // 🛑 防護 2：使用正規表達式，精準挖出大括號 { } 裡面的內容，無視其他廢話
+          const match = aiText.match(/\{[\s\S]*\}/);
+          if (!match) throw new Error("找不到有效的 JSON 資料");
+          
+          const jsonText = match[0];
+          const json = JSON.parse(jsonText);
+          
+          if(type==='meal') {
+             setMealForm(p=>({...p, ...json, name: json.name||"未命名", calories:json.calories||0}));
+          } else if(json.weight) {
+             setWeightInput(json.weight);
+          }
+          
           showNotification(`AI 分析完成`);
-        } else { showNotification(data.message || "AI 分析失敗", "error"); }
-      } catch(e) { showNotification("網路錯誤", "error"); }
-      setAnalyzing(false);
+        } else {
+          alert("❌ AI 辨識失敗：回傳格式異常");
+        }
+      } catch(e) { 
+        console.error(e);
+        alert("🚨 AI 處理錯誤：" + e.message);
+      } finally {
+        setAnalyzing(false);
+      }
     };
   };
 
@@ -488,9 +529,19 @@ export default function App() {
               <div className="border-b pb-4"><h3 className="font-bold text-sm text-gray-700 mb-3 flex items-center gap-2"><UserPlus size={16}/> 使用者管理</h3><div className="space-y-3 bg-gray-50 p-3 rounded"><div className="flex gap-2"><select value={currentUser} onChange={e=>handleUserChange(e.target.value)} className="w-full p-2 bg-white rounded text-sm focus:outline-none">{userList.map(u=><option key={u} value={u}>{u}</option>)}</select></div><div className="flex gap-2"><input type="text" placeholder="新名字..." value={newUserParams} onChange={e=>setNewUserParams(e.target.value)} className="w-full p-2 bg-white rounded text-sm focus:outline-none"/><button onClick={()=>{if(newUserParams){setUserList(p=>[...p,newUserParams]); handleUserChange(newUserParams); setNewUserParams('');}}} className="px-3 bg-theme-main text-white rounded text-xs flex items-center gap-1 whitespace-nowrap"><UserPlus size={12}/> 新增</button></div></div></div>
               
               <div className="border-b pb-4">
-                <h3 className="font-bold text-sm text-gray-700 mb-3 flex items-center gap-2"><Cloud size={16}/> 雲端連線</h3>
-                <input type="text" value={config.gasUrl} onChange={e=>setConfig({...config, gasUrl: e.target.value})} className="w-full p-2 bg-gray-50 rounded text-xs mb-2 focus:outline-none" placeholder="GAS URL"/>
-                <button onClick={()=>{localStorage.setItem('app_gas_url', config.gasUrl); showNotification("設定已儲存");}} className="w-full py-2 bg-gray-800 text-white rounded text-xs font-bold">儲存設定</button>
+                <h3 className="font-bold text-sm text-gray-700 mb-3 flex items-center gap-2"><Cloud size={16}/> 雲端連線設定</h3>
+                
+                <label className="text-xs text-gray-500 mb-1 block">GAS 雲端資料庫網址</label>
+                <input type="text" value={config.gasUrl} onChange={e=>setConfig({...config, gasUrl: e.target.value})} className="w-full p-2 bg-gray-50 rounded text-xs mb-3 focus:outline-none" placeholder="https://script.google.com/macros/s/..."/>
+                
+                <label className="text-xs text-gray-500 mb-1 block">Gemini API 金鑰 (僅儲存於本機)</label>
+                <input type="password" value={config.geminiKey} onChange={e=>setConfig({...config, geminiKey: e.target.value})} className="w-full p-2 bg-gray-50 rounded text-xs mb-3 focus:outline-none" placeholder="AIzaSy..."/>
+                
+                <button onClick={()=>{
+                  localStorage.setItem('app_gas_url', config.gasUrl);
+                  localStorage.setItem('app_gemini_key', config.geminiKey);
+                  showNotification("設定已儲存");
+                }} className="w-full py-2 bg-gray-800 text-white rounded text-xs font-bold">儲存設定</button>
               </div>
 
               <div>
